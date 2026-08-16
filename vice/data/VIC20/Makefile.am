@@ -53,6 +53,6 @@ EXTRA_DIST = $(vic20_DATA) $(sdl_keymaps)
 endif
 
 if USE_HEADLESSUI
-vic20_DATA = $(roms) $(romsets) $(palettes)
+vic20_DATA = $(roms) $(romsets) $(palettes) $(gtk3_keymaps)
 EXTRA_DIST = $(vic20_DATA) $(sdl_keymaps) $(gtk3_keymaps)
 endif

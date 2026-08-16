@@ -61,6 +61,7 @@
 #include "sysfile.h"
 #include "types.h"
 #include "util.h"
+#include "vicectl.h"
 #include "vice-event.h"
 
 #ifdef DBGKBD
@@ -1138,7 +1139,6 @@ int keyboard_set_keymap_index(int val, void *param)
     return 0;
 }
 
-#ifndef USE_HEADLESSUI
 /* handle change of "KeyboardType" */
 static int keyboard_set_keyboard_type(int val, void *param)
 {
@@ -1167,9 +1167,7 @@ static int keyboard_set_keyboard_type(int val, void *param)
     DBG(("<keyboard_set_keyboard_type(%d)", val));
     return 0;
 }
-#endif
 
-#ifndef USE_HEADLESSUI
 /* handle change if "KeyboardMapping" */
 static int keyboard_set_keyboard_mapping(int val, void *param)
 {
@@ -1201,7 +1199,6 @@ static int keyboard_set_keyboard_mapping(int val, void *param)
 
     return 0;
 }
-#endif
 
 /* return number of available keyboard maps for gives "type" and "index" (sym/pos) */
 int keyboard_get_num_mappings(void)
@@ -1260,17 +1257,17 @@ static char *keyboard_get_keymap_name(int idx, int mapping, int type)
 
     /* <port>_<type>_<idx>_<mapping>.vkm */
     if ((mapping == 0) && (tstr == NULL)) {
-        name = util_concat(KBD_PORT_PREFIX, "_", sympos[idx], ".vkm", NULL);
+        name = util_concat(KBD_KEYMAP_PREFIX, "_", sympos[idx], ".vkm", NULL);
     } else if ((mapping != 0) && (tstr == NULL)) {
-        name = util_concat(KBD_PORT_PREFIX, "_", sympos[idx], "_", mapname, ".vkm", NULL);
+        name = util_concat(KBD_KEYMAP_PREFIX, "_", sympos[idx], "_", mapname, ".vkm", NULL);
     } else if ((mapping == 0) && (tstr != NULL)) {
-        name = util_concat(KBD_PORT_PREFIX, "_", tstr, "_", sympos[idx], ".vkm", NULL);
+        name = util_concat(KBD_KEYMAP_PREFIX, "_", tstr, "_", sympos[idx], ".vkm", NULL);
     } else if ((mapping != 0) && (tstr != NULL)) {
-        name = util_concat(KBD_PORT_PREFIX, "_", tstr, "_", sympos[idx], "_", mapname, ".vkm", NULL);
+        name = util_concat(KBD_KEYMAP_PREFIX, "_", tstr, "_", sympos[idx], "_", mapname, ".vkm", NULL);
     }
 
     DBG(("keyboard_get_keymap_name: (port:%s type:%s idx:%d mapping:%d) '%s' = '%s'",
-                KBD_PORT_PREFIX, tstr ? tstr : "-", idx, mapping,
+                KBD_KEYMAP_PREFIX, tstr ? tstr : "-", idx, mapping,
                 idx ? "KeymapPosFile" : "KeymapSymFile", name));
 
     return name;
@@ -1403,7 +1400,6 @@ ok:
     return 0;
 }
 
-#ifndef USE_HEADLESSUI
 /* called by keyboard_resources_init to create the default keymap(s)
    idx is the index to the resource for the setting ("KeymapIndex")
  */
@@ -1440,7 +1436,6 @@ static int keyboard_set_default_keymap_file(int idx)
     DBG(("<keyboard_set_default_keymap_file(OK: idx: %d type: %d mapping: %d)", idx, type, mapping));
     return 0; /* success */
 }
-#endif
 
 /*--------------------------------------------------------------------------*/
 
@@ -1449,7 +1444,6 @@ static char *resources_string_d1 = NULL;
 static char *resources_string_d2 = NULL;
 static char *resources_string_d3 = NULL;
 
-#ifndef USE_HEADLESSUI
 static const resource_string_t resources_string[] = {
     { "KeymapSymFile", "", RES_EVENT_NO, NULL,
       &machine_keymap_file_list[KBD_INDEX_SYM],
@@ -1477,16 +1471,19 @@ static const resource_int_t resources_int[] = {
       &machine_keyboard_type, keyboard_set_keyboard_type, NULL },
     RESOURCE_INT_LIST_END
 };
-#endif
 
 /*--------------------------------------------------------------------------*/
 
 int keymap_resources_init(void)
 {
 #ifdef USE_HEADLESSUI
-    /* headless has no keyboard, no point in further initializing anything */
-    return 0;
-#else
+    /* The headless build has no keyboard of its own; it needs a keymap only
+       when vicectl is injecting host keysyms. With VICE_CTL_SOCK unset this
+       returns exactly where upstream returned. */
+    if (!vicectl_enabled()) {
+        return 0;
+    }
+#endif
     int nsym, npos, mapping, idx, type;
     const char *name;
 
@@ -1566,7 +1563,6 @@ int keymap_resources_init(void)
     }
     DBG(("<<keyboard_resources_init(ok)"));
     return 0;
-#endif
 }
 
 static void keyboard_resources_shutdown(void)
@@ -1587,7 +1583,6 @@ static void keyboard_resources_shutdown(void)
 
 /*--------------------------------------------------------------------------*/
 
-#ifndef USE_HEADLESSUI
 static cmdline_option_t const cmdline_options[] =
 {
     { "-keymap", SET_RESOURCE, CMDLINE_ATTRIB_NEED_ARGS,
@@ -1609,15 +1604,20 @@ static cmdline_option_t const cmdline_options[] =
       "<Name>", "Specify name of positional keymap file" },
     CMDLINE_LIST_END
 };
-#endif
 
 int keymap_cmdline_options_init(void)
 {
-#ifndef USE_HEADLESSUI
+#ifdef USE_HEADLESSUI
+    /* The headless build has no keyboard of its own; it needs a keymap only
+       when vicectl is injecting host keysyms. With VICE_CTL_SOCK unset this
+       returns exactly where upstream returned. */
+    if (!vicectl_enabled()) {
+        return 0;
+    }
+#endif
     if (machine_class != VICE_MACHINE_VSID) {
         return cmdline_register_options(cmdline_options);
     }
-#endif
     return 0;
 }
 
@@ -1625,12 +1625,18 @@ int keymap_cmdline_options_init(void)
 
 void keymap_init(void)
 {
-#ifndef USE_HEADLESSUI
+#ifdef USE_HEADLESSUI
+    /* The headless build has no keyboard of its own; it needs a keymap only
+       when vicectl is injecting host keysyms. With VICE_CTL_SOCK unset this
+       does exactly what upstream did: nothing. */
+    if (!vicectl_enabled()) {
+        return;
+    }
+#endif
     if (machine_class != VICE_MACHINE_VSID) {
         load_keymap_ok = 1;
         keyboard_set_keymap_index(machine_keymap_index, NULL);
     }
-#endif
 }
 
 void keymap_shutdown(void)

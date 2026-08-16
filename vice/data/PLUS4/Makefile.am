@@ -55,6 +55,6 @@ EXTRA_DIST = $(plus4_DATA) $(sdl_keymaps)
 endif
 
 if USE_HEADLESSUI
-plus4_DATA = $(roms) $(romsets) $(palettes)
+plus4_DATA = $(roms) $(romsets) $(palettes) $(gtk3_keymaps)
 EXTRA_DIST = $(plus4_DATA) $(sdl_keymaps) $(gtk3_keymaps)
 endif
