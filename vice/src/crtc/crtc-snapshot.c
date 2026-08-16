@@ -366,7 +366,10 @@ int crtc_snapshot_read_module(snapshot_t * s)
         ef = -1;
     }
 
-    crtc_update_window();
+    /* NOT a plain crtc_update_window(): a restore needs the nominal frameline
+       count and an unconditional viewport resize.  See the comment on the
+       function. */
+    crtc_restore_window_from_snapshot();
 
     if (ef) {
         log_error(crtc.log, "Failed to load snapshot module %s",

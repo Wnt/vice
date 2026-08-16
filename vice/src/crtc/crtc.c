@@ -416,6 +416,47 @@ void crtc_update_window(void)
     crtc.delayed_resize = false;
 }
 
+/* Re-establish the window after a snapshot has been read back in.
+ *
+ * Two things make this different from a plain crtc_update_window():
+ *
+ * 1. crtc.framelines carries TWO different meanings, and the snapshot saves
+ *    the one crtc_update_window() must not be given.  Between frames the
+ *    raster alarm handler assigns it the number of rasterlines the frame
+ *    ACTUALLY took (crtc.framelines = crtc.current_line -- the whole frame,
+ *    borders and vertical retrace included: 260 on a 60 Hz PET, 313 on a
+ *    50 Hz CBM-II), because that is what its end-of-frame test needs.
+ *    crtc_update_window() instead sizes the canvas as framelines +
+ *    CRTC_EXTRA_RASTERLINES + 2 * CRTC_SCREEN_BORDERHEIGHT, which only makes
+ *    sense for the NOMINAL active-line count -- and every other caller sets
+ *    framelines to regs[VDISP] * (regs[SCANLINE] + 1) before calling it (see
+ *    the delayed_resize branch of crtc_raster_draw_alarm_handler()).  Handing
+ *    it the saved runtime value grows the canvas by the height of the borders
+ *    plus the retrace, and since crtc_update_window() only ever GROWS
+ *    crtc.screen_height the enlargement is permanent.
+ *
+ * 2. crtc_update_window() only resizes the viewport when it changed the height
+ *    itself.  A restore reaches it with the height already correct but the
+ *    viewport wrong, because the machine's own snapshot read path calls
+ *    crtc_set_screen_options() first -- that resets screen_height to its
+ *    power-on value and resizes the viewport to match, and nothing afterwards
+ *    puts it back.  So resize unconditionally, exactly as
+ *    crtc_set_screen_options() does.
+ */
+void crtc_restore_window_from_snapshot(void)
+{
+    unsigned int runtime_framelines = crtc.framelines;
+
+    crtc.framelines = crtc.regs[CRTC_REG_VDISP]
+                      * (crtc.regs[CRTC_REG_SCANLINE] + 1);
+    crtc_update_window();
+    crtc.framelines = runtime_framelines;
+
+    if (crtc.raster.canvas != NULL) {
+        video_viewport_resize(crtc.raster.canvas, 1);
+    }
+}
+
 /*--------------------------------------------------------------------*/
 
 void crtc_set_screen_addr(uint8_t *screen)

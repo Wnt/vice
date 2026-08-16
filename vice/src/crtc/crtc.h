@@ -77,6 +77,7 @@ void crtc_screen_enable(int);
 int crtc_offscreen(void);
 
 void crtc_update_window(void);
+void crtc_restore_window_from_snapshot(void);
 void crtc_update_renderer(void);
 
 uint8_t *crtc_get_active_bitmap(void);
