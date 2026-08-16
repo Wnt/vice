@@ -92,6 +92,6 @@ EXTRA_DIST = $(c128_DATA) $(sdl_keymaps)
 endif
 
 if USE_HEADLESSUI
-c128_DATA = $(roms) $(romsets) $(palettes)
+c128_DATA = $(roms) $(romsets) $(palettes) $(gtk3_keymaps)
 EXTRA_DIST = $(c128_DATA) $(sdl_keymaps) $(gtk3_keymaps)
 endif

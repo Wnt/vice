@@ -75,6 +75,6 @@ EXTRA_DIST = $(cbm2_DATA) $(sdl_keymaps)
 endif
 
 if USE_HEADLESSUI
-cbm2_DATA = $(roms) $(romsets) $(palettes)
+cbm2_DATA = $(roms) $(romsets) $(palettes) $(gtk3_keymaps)
 EXTRA_DIST = $(cbm2_DATA) $(sdl_keymaps) $(gtk3_keymaps)
 endif

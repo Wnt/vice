@@ -39,6 +39,9 @@ void kbd_initialize_numpad_joykeys(int *joykeys);
 
 #define KBD_PORT_PREFIX "sdl"
 
+/* which shipped .vkm family this build keysym numbers match */
+#define KBD_KEYMAP_PREFIX "sdl"
+
 #ifdef USE_SDL2UI
 #define SDLKey SDL_Keycode
 #define SDLMod SDL_Keymod

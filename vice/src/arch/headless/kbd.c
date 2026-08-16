@@ -32,6 +32,7 @@
 #include "vice.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include "lib.h"
 #include "log.h"
 #include "ui.h"
@@ -44,6 +45,7 @@
 #include "keyboard.h"
 #include "keymap.h"
 #include "kbd.h"
+#include "x11keysyms.h"
 
 
 int kbd_arch_get_host_mapping(void)
@@ -73,18 +75,48 @@ void kbd_arch_shutdown(void)
     /* Also don't call kbd_hotkey_shutdown() here */
 }
 
+/* The headless UI has no toolkit and so no keysyms of its own. It borrows
+   X11's, which is exactly the numbering the shipped gtk3_*.vkm keymaps use
+   (see KBD_KEYMAP_PREFIX in kbd.h), so those maps load here unchanged and a
+   headless station resolves a key to the same matrix position a windowed one
+   does. The table is generated from X11/keysymdef.h by x11keysyms.sh. */
 signed long kbd_arch_keyname_to_keynum(char *keyname)
 {
-    /* printf("%s\n", __func__); */
+    int i;
+
+    if (keyname == NULL || *keyname == '\0') {
+        return -1;
+    }
+
+    for (i = 0; x11_keysyms[i].name != NULL; i++) {
+        if (strcmp(x11_keysyms[i].name, keyname) == 0) {
+            return x11_keysyms[i].sym;
+        }
+    }
+
+    /* numeric form, as emitted by kbd_arch_keynum_to_keyname() */
+    if (keyname[0] >= '0' && keyname[0] <= '9') {
+        char *end = NULL;
+        long v = strtol(keyname, &end, 0);
+
+        if (end != NULL && *end == '\0') {
+            return v;
+        }
+    }
 
     return -1;
 }
 
 const char *kbd_arch_keynum_to_keyname(signed long keynum)
 {
-    /* printf("%s\n", __func__); */
-
     static char keyname[20];
+    int i;
+
+    for (i = 0; x11_keysyms[i].name != NULL; i++) {
+        if (x11_keysyms[i].sym == keynum) {
+            return x11_keysyms[i].name;
+        }
+    }
 
     memset(keyname, 0, 20);
 

@@ -54,6 +54,9 @@ void kbd_connect_handlers(GtkWidget *widget, void *data);
  */
 #define KBD_PORT_PREFIX "gtk3"
 
+/* which shipped .vkm family this build keysym numbers match */
+#define KBD_KEYMAP_PREFIX "gtk3"
+
 /* add more function prototypes as needed below */
 
 signed long kbd_arch_keyname_to_keynum(char *keyname);

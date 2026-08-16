@@ -106,6 +106,6 @@ EXTRA_DIST = $(scpu64_DATA) $(sdl_keymaps)
 endif
 
 if USE_HEADLESSUI
-scpu64_DATA = $(roms) $(romsets) $(palettes) $(sym_file)
+scpu64_DATA = $(roms) $(romsets) $(palettes) $(sym_file) $(gtk3_keymaps)
 EXTRA_DIST = $(scpu64_DATA) $(sdl_keymaps) $(gtk3_keymaps)
 endif

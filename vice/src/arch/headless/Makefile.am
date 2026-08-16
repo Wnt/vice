@@ -72,6 +72,7 @@ EXTRA_DIST = \
 	archdep.h \
 	debug_headless.h \
 	kbd.h \
+	x11keysyms.h \
 	mousedrv.h \
 	ui.h \
 	uistatusbar.h \

@@ -35,6 +35,9 @@ void kbd_initialize_numpad_joykeys(int *joykeys);
 
 #define KBD_PORT_PREFIX "headless"
 
+/* which shipped .vkm family this build keysym numbers match */
+#define KBD_KEYMAP_PREFIX "gtk3"
+
 /* add more function prototypes as needed below */
 
 signed long kbd_arch_keyname_to_keynum(char *keyname);
