@@ -67,6 +67,7 @@
 #include "uihotkeys.h"
 #include "util.h"
 #include "version.h"
+#include "vicectl.h"
 #include "video.h"
 #include "vsyncapi.h"
 
@@ -459,6 +460,10 @@ int main_program(int argc, char **argv)
     if (init_main() < 0) {
         return -1;
     }
+
+    /* vicectl: bring the control socket up once the machine -- and with
+       it the keymap -- exists. No-op unless VICE_CTL_SOCK is set. */
+    vicectl_init();
 
 #ifdef USE_VICE_THREAD
 

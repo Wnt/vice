@@ -275,6 +275,7 @@ noinst_HEADERS = \
 	via.h \
 	vic20ui.h \
 	vice.h \
+	vicectl.h \
 	vicedate.h \
 	vice-event.h \
 	vicesocket.h \
@@ -342,6 +343,7 @@ base_sources = \
 	traps.c \
 	util.c \
 	vicefeatures.c \
+	vicectl.c \
 	vsync.c \
 	zfile.c \
 	zipcode.c
