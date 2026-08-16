@@ -33,6 +33,7 @@
 #include "cmdline.h"
 #include "machine.h"
 #include "resources.h"
+#include "shmfb.h"
 #include "videoarch.h"
 #include "video.h"
 
@@ -117,7 +118,12 @@ char video_canvas_can_resize(video_canvas_t *canvas)
 {
     /* printf("%s\n", __func__); */
 
-    return 0;
+    /* With no destination there is nothing to size, which is what upstream
+     * headless says. With VICE_SHM_PATH set the mapping IS the destination and
+     * it follows the emulated screen, so the canvas must adopt the visible
+     * size -- that assignment (video_viewport_resize) is what fills
+     * canvas_physical_width/height, and a zero-sized canvas publishes nothing. */
+    return shmfb_enabled() ? 1 : 0;
 }
 
 /** \brief Create a new video_canvas_s.
@@ -166,6 +172,12 @@ void video_canvas_refresh(struct video_canvas_s *canvas,
                           unsigned int w, unsigned int h)
 {
     /* printf("%s\n", __func__); */
+
+    /* THE SEAM. This is the one arch-side call the emulator core makes when a
+     * rectangle of the emulated screen is finished, and it is where gtk3 and
+     * sdl2 render into their own surfaces. Unset VICE_SHM_PATH and this is the
+     * upstream no-op. */
+    shmfb_refresh(canvas, xs, ys, xi, yi, w, h);
 }
 
 /** \brief Update canvas size to match the draw buffer size requested
@@ -191,6 +203,10 @@ int video_canvas_set_palette(struct video_canvas_s *canvas,
 
     canvas->palette = palette;
 
+    /* Program the render tables for host-endian XRGB8888 so the published
+     * pixels need no conversion. No-op without VICE_SHM_PATH. */
+    shmfb_set_palette(canvas);
+
     return 0;
 }
 
@@ -201,6 +217,8 @@ int video_init(void)
 {
     /* printf("%s\n", __func__); */
 
+    shmfb_init();
+
     return 0;
 }
 
@@ -208,4 +226,6 @@ int video_init(void)
 void video_shutdown(void)
 {
     /* printf("%s\n", __func__); */
+
+    shmfb_shutdown();
 }
