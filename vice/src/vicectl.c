@@ -78,14 +78,23 @@
     Pacing is PER KEY, not global: a global slot is the ~6 keys/second ceiling
     that the MAME campaign had to remove.
 
-    AND A RELEASE OUTRANKS A DEFERRED PRESS. Real typing overlaps: the browser
-    sends `A down, B down, A up, B up`, so under EXCL the deferred B-press is
-    waiting on the A-release that sits BEHIND it in the same queue. Draining in
-    strict arrival order therefore DEADLOCKS the whole keyboard after one key.
-    key_drain() states the four order rules; the one that matters is that a
-    NON-modifier release may overtake a deferred press (nothing else can ever
-    unblock it) while a MODIFIER release may not (the deferred press is the
-    character that shift level belongs to).
+    ORDER IS NOT ARRIVAL ORDER, AND IT IS NOT FREE-FOR-ALL EITHER. Two live
+    defects came out of getting this wrong in each direction:
+
+      - Strict arrival order DEADLOCKS. Real typing overlaps: the browser sends
+        `A down, B down, A up, B up`, so under EXCL the deferred B-press waits
+        on the A-release that sits BEHIND it in the same queue. Draining in
+        strict order wedged the whole keyboard after ONE key.
+      - Letting everything float MISPLACES THE SHIFT LEVEL. A browser sends a
+        character's press and release milliseconds apart, so the release is
+        almost always still inside its own HOLD dwell when the NEXT character's
+        modifier press arrives. `2 down, 2 up, Shift down, + down` typed
+        `1"+34` for `12+34`: Shift, exempt from the EXCL gate because a held
+        shift is a level and not a keystroke, sailed past the deferred `2` UP
+        and shifted a key that was still down.
+
+    So a modifier edge is a BARRIER IN BOTH DIRECTIONS, and key_drain() gets its
+    ordering from three barriers rather than from the queue order. See there.
 
     Redundant edges COALESCE against the queued state, not the applied one:
     browser auto-repeat resends keydown with no keyup and the CBM KERNAL does
@@ -456,33 +465,65 @@ static void key_apply(key_ent_t *e)
 
 /* Drain the paced queue. Runs on the emulation thread, once per frame.
 
-   THE ORDER RULES, and the second one is the whole point of this function:
+   An edge that cannot be applied this frame raises a BARRIER, and what a later
+   edge is allowed to slip past depends on which barriers are standing:
 
-     1. Per key, edges apply in arrival order. Its own HOLD/GAP dwell gates it.
-     2. A PRESS never overtakes an earlier press (that would reorder the typed
-        characters) and never overtakes a deferred press's modifier level.
-     3. A NON-MODIFIER RELEASE **must** be allowed past a deferred press.
-     4. A MODIFIER release must NOT: the deferred press is very likely the
-        character that shift level belongs to, and letting Shift go first is
-        how the MAME wave typed shifted characters unshifted.
+     bar_press    a PRESS is waiting          -> blocks presses, blocks modifiers
+     bar_mod      a MODIFIER edge is waiting  -> blocks EVERYTHING
+     bar_release  a NON-mod RELEASE waiting   -> blocks modifiers only
 
-   Rule 3 is not an optimisation, it is the deadlock fix. Real typing OVERLAPS
-   (rollover): the browser sends `A down, B down, A up, B up`. Under EXCL, B's
-   press waits for `ctl_excl_down == 0`, i.e. for A's RELEASE — which sits
-   BEHIND it in this very queue. The original code `break`ed out of the drain on
-   every blocking condition, so the queue head stayed B-down forever, A-up was
-   never reached, and the module went permanently silent after ONE key:
-   measured on a 52-edge rollover burst, `keys` advanced by exactly 1 and
-   `queued` stayed 1 while frames kept ticking. The daemon then saw acks stop,
-   timed out, reconnected, KEYCLEARed and lost the rest of the line — which is
-   what "the keyboard stops reacting when you type at normal pace" is, and why
-   typing SLOWLY works (no overlap: A's release arrives before B's press). */
+   Read as three sentences:
+
+     1. A modifier edge never moves relative to anything. It carries a LEVEL,
+        and a level that slides one edge in either direction lands on the wrong
+        character. Both live defects below were a modifier that moved.
+     2. A press never overtakes a press (that reorders the typed characters) and
+        never overtakes a waiting modifier (that types it at the wrong level).
+     3. A NON-modifier release may overtake a waiting press. This is the one
+        reordering the design NEEDS, because nothing else can ever unblock that
+        press -- and it is safe, because a release carries no level and the key
+        it ends is already down.
+
+   Barriers are raised ONLY by an edge held back by its own dwell gate or by the
+   EXCL gate, NEVER by an edge held back by a barrier. That is what makes the
+   relation acyclic: every barrier is cleared by the passage of time (a dwell
+   elapsing) or by a release that rule 3 always lets through, so no set of
+   barriers can wait on itself.
+
+   THE TWO DEFECTS THIS SHAPE EXISTS FOR, both found on the live vic20 station:
+
+     Rule 3 missing => DEADLOCK. Draining in strict arrival order (`break` on
+     every blocking condition) meant the deferred B-press stayed at the head of
+     the queue forever while A's release, the only thing that could clear the
+     EXCL gate, sat behind it. Measured: a 52-edge rollover burst applied
+     exactly ONE edge, `queued=1` forever, frames still ticking. The daemon saw
+     its acks stop, timed out, reconnected, KEYCLEARed, and the line was gone.
+     Typing SLOWLY worked, because slow typing does not overlap.
+
+     Rule 1 missing => THE SHIFT LANDS ON THE PREVIOUS CHARACTER. Fixing the
+     deadlock by letting edges float freely let a modifier PRESS overtake a
+     RELEASE still inside its HOLD dwell -- and a browser sends press and
+     release milliseconds apart, so that dwell is nearly always still running
+     when the next character's Shift arrives. `print 12+34` rendered
+     `PRINT 1"+34`: Shift+Equal's shift landed while `2` was still down, and
+     `"` IS Shift+2. Digits-only lines were perfect and letters were clean,
+     which is the signature of a MISTIMED modifier rather than a stuck one.
+
+   Both were found only by bursts that reproduce real browser timing: OVERLAP
+   (next key down before the previous is up) for the first, and a press/release
+   pair milliseconds apart for the second. A clean, slow, one-key-at-a-time
+   test shows neither. */
 static void key_drain(void)
 {
     key_ent_t *e, *prev = NULL, *next;
     int blocked[KEY_STATE_MAX];
     int n_blocked = 0, i, is_blocked;
-    int deferred_press = 0;
+    /* BARRIERS. Set ONLY when an edge is held back by its own dwell gate or by
+       the EXCL gate -- never when it is held back by one of these barriers,
+       which is what keeps them acyclic and the drain deadlock-free. */
+    int bar_press = 0;      /* a PRESS is waiting */
+    int bar_mod = 0;        /* a MODIFIER edge is waiting */
+    int bar_release = 0;    /* a NON-modifier RELEASE is waiting */
 
     for (e = ctl_key_head; e != NULL; e = next) {
         key_state_t *st;
@@ -512,8 +553,10 @@ static void key_drain(void)
 
         mod_key = ent_is_modifier(e);
 
-        /* rules 2 and 4 */
-        if (ctl_excl && deferred_press && (e->val == 1 || mod_key)) {
+        /* rules 2, 3 and 4 */
+        if (ctl_excl
+            && (mod_key ? (bar_press || bar_mod || bar_release)
+                        : (e->val == 1 ? (bar_press || bar_mod) : bar_mod))) {
             if (n_blocked < KEY_STATE_MAX) {
                 blocked[n_blocked++] = e->id;
             }
@@ -524,8 +567,12 @@ static void key_drain(void)
         gate = (e->val == 1) ? (st->up_frame + ctl_gap_frames)
                              : (st->down_frame + ctl_hold_frames);
         if (ctl_frame < gate) {
-            if (e->val == 1) {
-                deferred_press = 1;
+            if (mod_key) {
+                bar_mod = 1;
+            } else if (e->val == 1) {
+                bar_press = 1;
+            } else {
+                bar_release = 1;
             }
             if (n_blocked < KEY_STATE_MAX) {
                 blocked[n_blocked++] = e->id;
@@ -536,7 +583,7 @@ static void key_drain(void)
 
         if (ctl_excl && e->val == 1 && !mod_key
             && (ctl_excl_down > 0 || ctl_frame < ctl_excl_up_frame + ctl_gap_frames)) {
-            deferred_press = 1;
+            bar_press = 1;      /* non-modifier press, by the branch above */
             if (n_blocked < KEY_STATE_MAX) {
                 blocked[n_blocked++] = e->id;
             }
