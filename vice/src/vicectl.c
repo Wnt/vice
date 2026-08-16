@@ -270,7 +270,13 @@ static void reply_ok(int conn, unsigned int gen, const char *seq, const char *de
 {
     char buf[512];
 
-    snprintf(buf, sizeof(buf), "%s OK%s%s\n", seq,
+    /* Bound both fields explicitly. gcc cannot see that a caller's `detail`
+       is short, so an unbounded %s here is a -Wformat-truncation warning on
+       every build; the kernel-hive builder asserts a clean build, and a
+       warning nobody can fix is a warning everybody learns to ignore. The
+       clamps are far above any reply this module actually sends (the long
+       payloads go through reply_data(), not here). */
+    snprintf(buf, sizeof(buf), "%.64s OK%s%.400s\n", seq,
              (detail != NULL && *detail != '\0') ? " " : "",
              (detail != NULL) ? detail : "");
     reply_push(conn, gen, buf);
