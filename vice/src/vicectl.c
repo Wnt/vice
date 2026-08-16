@@ -100,6 +100,10 @@
     browser auto-repeat resends keydown with no keyup and the CBM KERNAL does
     its own repeat from the held matrix bit.
 
+    SAVEST/LOADST are ACKED WHEN THE SNAPSHOT HAPPENED, not when the line was
+    parsed: they run from a CPU trap, because a snapshot taken from the frame
+    callback saves stale CPU registers (see ctl_snapshot_trap below).
+
     ENV (all optional; the gate is the only one that must be set):
       VICE_CTL_SOCK       listener path; unset/empty => this file does nothing
                           at all and the binary behaves exactly like upstream
@@ -123,6 +127,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include "interrupt.h"
 #include "kbd.h"
 #include "keyboard.h"
 #include "keymap.h"
@@ -133,6 +138,8 @@
 #include "machine-video.h"
 #include "maincpu.h"
 #include "screenshot.h"
+#include "sound.h"
+#include "vsync.h"
 #include "vicectl.h"
 
 #define VICECTL_PROTO       "vicectl/1"
@@ -669,6 +676,81 @@ static void do_keydump(int conn, unsigned int gen, const char *seq)
     reply_ok(conn, gen, seq, buf);
 }
 
+/* ------------------------------------------------------ snapshot traps */
+
+/* SAVEST and LOADST MUST run from a CPU trap, not from dispatch().
+ *
+ * dispatch() runs from vicectl_frame(), i.e. from vsync, i.e. from inside the
+ * raster alarm while maincpu_mainloop() is between instructions but has NOT
+ * exported its registers: the 6502 registers live in locals in 6510core.c and
+ * reach the global maincpu_regs only inside an EXPORT_REGISTERS() bracket,
+ * which the core opens for traps, DMA and the monitor and for nothing else.
+ * machine_write_snapshot() called straight from dispatch() therefore wrote a
+ * machine whose CPU registers were STALE, and restoring it dropped the CPU at
+ * a dead PC: a PLUS/4 golden baked this way came back and fell into TEDMON
+ * ("BREAK, PC=$0005") seconds later, and a PET 8032 golden printed
+ * "?illegal quantity error in  0" into a live BASIC.  The same snapshot taken
+ * through the monitor's own `dump`, which runs inside monitor_startup() and so
+ * inside EXPORT_REGISTERS(), restores perfectly.
+ *
+ * Every legitimate in-tree caller does it this way -- see
+ * arch/gtk3/uisnapshot.c, which triggers a trap for all four of its
+ * save/load/quicksave/quickload paths.  The ack moves with the work: the
+ * client's OK/ERR is sent from the trap, when the snapshot has actually
+ * happened, so an acked SAVEST still means "the file is on disk".
+ */
+
+typedef struct ctl_snap_s {
+    int conn;
+    unsigned int gen;
+    char *seq;
+    char *path;
+    int load;                   /* 0 = SAVEST, 1 = LOADST */
+} ctl_snap_t;
+
+static void ctl_snapshot_trap(uint16_t addr, void *data)
+{
+    ctl_snap_t *s = (ctl_snap_t *)data;
+    int rc;
+
+    vsync_suspend_speed_eval();
+    sound_suspend();
+
+    rc = s->load ? machine_read_snapshot(s->path, 0)
+                 : machine_write_snapshot(s->path, 0, 0, 0);
+    if (rc < 0) {
+        reply_err(s->conn, s->gen, s->seq,
+                  s->load ? "loadfail" : "savefail", s->path);
+    } else {
+        reply_ok(s->conn, s->gen, s->seq, s->path);
+    }
+
+    lib_free(s->seq);
+    lib_free(s->path);
+    lib_free(s);
+}
+
+static void ctl_snapshot_request(ctl_cmd_t *c, const char *path, int load)
+{
+    ctl_snap_t *s;
+
+    if (path[0] == '\0') {
+        reply_err(c->conn, c->gen, c->seq, "badarg",
+                  load ? "LOADST <path>" : "SAVEST <path>");
+        return;
+    }
+
+    /* dispatch() frees c->seq as soon as we return; the trap outlives it. */
+    s = lib_malloc(sizeof(ctl_snap_t));
+    s->conn = c->conn;
+    s->gen = c->gen;
+    s->seq = lib_strdup(c->seq);
+    s->path = lib_strdup(path);
+    s->load = load;
+
+    interrupt_maincpu_trigger_trap(ctl_snapshot_trap, (void *)s);
+}
+
 /* ------------------------------------------------------------- dispatch */
 
 static void dispatch(ctl_cmd_t *c)
@@ -768,17 +850,9 @@ static void dispatch(ctl_cmd_t *c)
                                              : MACHINE_RESET_MODE_RESET_CPU);
         reply_ok(c->conn, c->gen, c->seq, NULL);
     } else if (strcmp(verb, "SAVEST") == 0) {
-        if (machine_write_snapshot(rest, 0, 0, 0) < 0) {
-            reply_err(c->conn, c->gen, c->seq, "savefail", rest);
-        } else {
-            reply_ok(c->conn, c->gen, c->seq, rest);
-        }
+        ctl_snapshot_request(c, rest, 0);
     } else if (strcmp(verb, "LOADST") == 0) {
-        if (machine_read_snapshot(rest, 0) < 0) {
-            reply_err(c->conn, c->gen, c->seq, "loadfail", rest);
-        } else {
-            reply_ok(c->conn, c->gen, c->seq, rest);
-        }
+        ctl_snapshot_request(c, rest, 1);
     } else if (strcmp(verb, "STAT") == 0) {
         char buf[256];
 
