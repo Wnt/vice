@@ -78,6 +78,15 @@
     Pacing is PER KEY, not global: a global slot is the ~6 keys/second ceiling
     that the MAME campaign had to remove.
 
+    AND A RELEASE OUTRANKS A DEFERRED PRESS. Real typing overlaps: the browser
+    sends `A down, B down, A up, B up`, so under EXCL the deferred B-press is
+    waiting on the A-release that sits BEHIND it in the same queue. Draining in
+    strict arrival order therefore DEADLOCKS the whole keyboard after one key.
+    key_drain() states the four order rules; the one that matters is that a
+    NON-modifier release may overtake a deferred press (nothing else can ever
+    unblock it) while a MODIFIER release may not (the deferred press is the
+    character that shift level belongs to).
+
     Redundant edges COALESCE against the queued state, not the applied one:
     browser auto-repeat resends keydown with no keyup and the CBM KERNAL does
     its own repeat from the held matrix bit.
@@ -413,6 +422,19 @@ static void key_enqueue(key_ent_t *e)
     ctl_key_tail = e;
 }
 
+static void key_queue_flush(void)
+{
+    key_ent_t *e = ctl_key_head, *next;
+
+    while (e != NULL) {
+        next = e->next;
+        lib_free(e->seq);
+        lib_free(e);
+        e = next;
+    }
+    ctl_key_head = ctl_key_tail = NULL;
+}
+
 static void key_apply(key_ent_t *e)
 {
     if (e->kind == KEY_KIND_SYM) {
@@ -432,11 +454,35 @@ static void key_apply(key_ent_t *e)
     }
 }
 
+/* Drain the paced queue. Runs on the emulation thread, once per frame.
+
+   THE ORDER RULES, and the second one is the whole point of this function:
+
+     1. Per key, edges apply in arrival order. Its own HOLD/GAP dwell gates it.
+     2. A PRESS never overtakes an earlier press (that would reorder the typed
+        characters) and never overtakes a deferred press's modifier level.
+     3. A NON-MODIFIER RELEASE **must** be allowed past a deferred press.
+     4. A MODIFIER release must NOT: the deferred press is very likely the
+        character that shift level belongs to, and letting Shift go first is
+        how the MAME wave typed shifted characters unshifted.
+
+   Rule 3 is not an optimisation, it is the deadlock fix. Real typing OVERLAPS
+   (rollover): the browser sends `A down, B down, A up, B up`. Under EXCL, B's
+   press waits for `ctl_excl_down == 0`, i.e. for A's RELEASE — which sits
+   BEHIND it in this very queue. The original code `break`ed out of the drain on
+   every blocking condition, so the queue head stayed B-down forever, A-up was
+   never reached, and the module went permanently silent after ONE key:
+   measured on a 52-edge rollover burst, `keys` advanced by exactly 1 and
+   `queued` stayed 1 while frames kept ticking. The daemon then saw acks stop,
+   timed out, reconnected, KEYCLEARed and lost the rest of the line — which is
+   what "the keyboard stops reacting when you type at normal pace" is, and why
+   typing SLOWLY works (no overlap: A's release arrives before B's press). */
 static void key_drain(void)
 {
     key_ent_t *e, *prev = NULL, *next;
     int blocked[KEY_STATE_MAX];
     int n_blocked = 0, i, is_blocked;
+    int deferred_press = 0;
 
     for (e = ctl_key_head; e != NULL; e = next) {
         key_state_t *st;
@@ -453,11 +499,7 @@ static void key_drain(void)
             }
         }
         if (is_blocked) {
-            if (ctl_excl) {
-                /* strict order: a shift release must never overtake a
-                   deferred press */
-                break;
-            }
+            /* rule 1: this key already has an unapplied edge in front */
             prev = e;
             continue;
         }
@@ -468,11 +510,22 @@ static void key_drain(void)
             goto drop;
         }
 
+        mod_key = ent_is_modifier(e);
+
+        /* rules 2 and 4 */
+        if (ctl_excl && deferred_press && (e->val == 1 || mod_key)) {
+            if (n_blocked < KEY_STATE_MAX) {
+                blocked[n_blocked++] = e->id;
+            }
+            prev = e;
+            continue;
+        }
+
         gate = (e->val == 1) ? (st->up_frame + ctl_gap_frames)
                              : (st->down_frame + ctl_hold_frames);
         if (ctl_frame < gate) {
-            if (ctl_excl) {
-                break;
+            if (e->val == 1) {
+                deferred_press = 1;
             }
             if (n_blocked < KEY_STATE_MAX) {
                 blocked[n_blocked++] = e->id;
@@ -481,10 +534,14 @@ static void key_drain(void)
             continue;
         }
 
-        mod_key = ent_is_modifier(e);
         if (ctl_excl && e->val == 1 && !mod_key
             && (ctl_excl_down > 0 || ctl_frame < ctl_excl_up_frame + ctl_gap_frames)) {
-            break;
+            deferred_press = 1;
+            if (n_blocked < KEY_STATE_MAX) {
+                blocked[n_blocked++] = e->id;
+            }
+            prev = e;
+            continue;
         }
 
         key_apply(e);
@@ -634,6 +691,12 @@ static void dispatch(ctl_cmd_t *c)
         e->seq = lib_strdup(c->seq);
         key_enqueue(e);
     } else if (strcmp(verb, "KEYCLEAR") == 0) {
+        /* The daemon sends this as its reconnect preamble and FORGETS every
+           edge it had outstanding. The module must forget them too: a queue
+           left standing here is replayed into a machine whose owner no longer
+           tracks it, so a press whose release was dropped with the old
+           connection stays down and the guest auto-repeats it forever. */
+        key_queue_flush();
         keyboard_key_clear();
         ctl_mod = 0;
         ctl_excl_down = 0;
