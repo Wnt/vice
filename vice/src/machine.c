@@ -39,6 +39,7 @@
 #include "console.h"
 #include "diskimage.h"
 #include "drive.h"
+#include "vicectl.h"
 #include "vice-event.h"
 #include "fliplist.h"
 #include "fsdevice.h"
@@ -343,6 +344,7 @@ static void screenshot_at_exit(void)
 
 void machine_shutdown(void)
 {
+    vicectl_shutdown();
     int save_on_exit;
 
     if (!machine_init_was_called) {

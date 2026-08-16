@@ -67,6 +67,7 @@
 #include "sound.h"
 #include "types.h"
 #include "videoarch.h"
+#include "vicectl.h"
 #include "vsync.h"
 #include "vsyncapi.h"
 
@@ -669,6 +670,10 @@ void vsync_do_vsync(struct video_canvas_s *c)
     tick_t network_hook_time = 0;
 
     monitor_vsync_hook();
+
+    /* vicectl: emulation-thread drain of the control socket. No-op
+       unless VICE_CTL_SOCK is set. */
+    vicectl_frame();
 
     /*
      * process everything wich should be done before the synchronisation
