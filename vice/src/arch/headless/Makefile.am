@@ -51,6 +51,7 @@ libarch_a_SOURCES = \
 	uistatusbar.c \
 	main.c \
 	video.c \
+	shmfb.c \
 	vsidui.c \
 	vsyncarch.c \
 	c64scui.c \
@@ -75,5 +76,6 @@ EXTRA_DIST = \
 	mousedrv.h \
 	ui.h \
 	uistatusbar.h \
+	shmfb.h \
 	videoarch.h \
 	make-bindist_win32.sh
