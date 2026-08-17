@@ -371,6 +371,26 @@ int crtc_snapshot_read_module(snapshot_t * s)
        function. */
     crtc_restore_window_from_snapshot();
 
+    /* A RESTORE JUMPS THE CLOCK, AND frame_start IS NOT IN THE SNAPSHOT.
+       At the next vertical sync the CRTC measures the frame it just drew as
+       `crtc.rl_start - crtc.frame_start` and hands that to
+       machine_set_cycles_per_frame().  frame_start still holds a value from
+       BEFORE the restore, so what it measures is the size of the clock jump --
+       the whole run time baked into the golden.  Measured on cbm8032: 13 061
+       056 cycles, logged as "PET: cycles per frame set to 13061056, refresh to
+       0.076Hz", i.e. the machine's declared refresh rate is wrong by four
+       orders of magnitude for one frame.  Zero means "no previous frame", so
+       the first vsync after a restore only re-anchors and the second one
+       measures a real frame. */
+    crtc.frame_start = 0;
+
+    /* Invalidate the line cache, the way every OTHER video chip's snapshot
+       module already does (vicii, viciisc, vic, ted all end with this call).
+       The CRTC's own copy sits inside a `#if 0` block a few lines above and so
+       never runs.  It costs one frame of redraw and it means a restored CRTC
+       can never keep a cached line that the snapshot contradicts. */
+    raster_force_repaint(&crtc.raster);
+
     if (ef) {
         log_error(crtc.log, "Failed to load snapshot module %s",
                   snap_module_name);
