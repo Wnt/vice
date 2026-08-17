@@ -269,6 +269,7 @@ int sound_cmdline_options_init(void);
 int sound_init_alsa_device(void);
 int sound_init_dummy_device(void);
 int sound_init_dump_device(void);
+int sound_init_fifo_device(void);
 int sound_init_fs_device(void);
 int sound_init_wav_device(void);
 int sound_init_sdl_device(void);

@@ -136,6 +136,10 @@ static const sound_register_devices_t sound_register_devices[] = {
        a record device */
     { "dump", "Sound chip write recording", sound_init_dump_device, SOUND_PLAYBACK_DEVICE },
 
+    /* Raw stereo PCM with NO header: the shape a consumer reading a named
+       pipe needs.  `fs` is raw but mono-only and `wav` is stereo but opens
+       with 44 bytes of RIFF, which a raw consumer plays as a click. */
+    { "fifo", "Raw PCM stream (no header, stereo)", sound_init_fifo_device, SOUND_RECORD_DEVICE },
     { "fs", "Raw sound recording", sound_init_fs_device, SOUND_RECORD_DEVICE },
     { "wav", "RIFF/WAV sound recording", sound_init_wav_device, SOUND_RECORD_DEVICE },
     { "voc", "Creative Voice VOC sound recording", sound_init_voc_device, SOUND_RECORD_DEVICE },
