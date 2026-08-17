@@ -52,6 +52,11 @@
  *  unset variable leaves the headless UI byte-for-byte as upstream:
  *
  *    VICE_SHM_PATH   (required)  file to publish into; unset = do nothing
+ *    VICE_SHM_CHIP   (optional)  which video chip's canvas to publish, by the
+ *                                chip's own resource prefix and case-
+ *                                insensitively: VICII, VDC, VIC, TED, CRTC.
+ *                                Unset keeps the historical behaviour (the
+ *                                first canvas to refresh claims the mapping).
  *    VICE_SHM_TRACE  (optional)  log the mapping and a periodic publish count
  *
  *  WIRE FORMAT -- a 64-byte header followed by width*height 32bpp pixels:
@@ -84,8 +89,17 @@
  *  accepted.
  *
  *  ONE PUBLISHER PER MAPPING.  A machine with two video chips (x128: VICII and
- *  VDC) has two canvases; the first canvas to refresh claims the mapping and
- *  the other is ignored, so the seqlock's single-producer premise holds.
+ *  VDC) has two canvases, and only one may write the mapping or the seqlock's
+ *  single-producer premise breaks.
+ *
+ *  WHICH one must be a CHOICE, not a race.  Without VICE_SHM_CHIP the first
+ *  canvas to reach video_canvas_refresh() claims the mapping, and on x128 that
+ *  is decided by refresh order -- an 80-column exhibit that wants the VDC gets
+ *  it by luck and loses it to any change in when the two chips first paint.
+ *  With VICE_SHM_CHIP set, a canvas may claim the mapping only if its
+ *  videoconfig->chip_name matches, and if no canvas ever matches the mapping
+ *  stays empty, which is loud (the boot gate reads zero bytes) rather than
+ *  quietly wrong.
  */
 
 #include "vice.h"
@@ -113,10 +127,38 @@
 #define SHM_VERSION 1U
 
 static const char *shm_path = NULL;
+static const char *shm_chip = NULL;
 static int shm_trace = 0;
 
 /** \brief  The canvas that claimed the mapping (see ONE PUBLISHER above). */
 static struct video_canvas_s *shm_owner = NULL;
+
+/** \brief  Case-insensitive chip-name compare, no <strings.h> assumptions.
+ *
+ * The names are VICE's own resource prefixes -- "VICII", "VDC", "VIC", "TED",
+ * "CRTC" -- and an operator writing VICE_SHM_CHIP into a station fixture
+ * should not have to guess VICE's capitalisation.
+ */
+static int shmfb_chip_matches(const char *chip, const char *want)
+{
+    size_t i;
+
+    for (i = 0; chip[i] != '\0' && want[i] != '\0'; i++) {
+        int a = (unsigned char)chip[i];
+        int b = (unsigned char)want[i];
+
+        if (a >= 'a' && a <= 'z') {
+            a -= 'a' - 'A';
+        }
+        if (b >= 'a' && b <= 'z') {
+            b -= 'a' - 'A';
+        }
+        if (a != b) {
+            return 0;
+        }
+    }
+    return chip[i] == '\0' && want[i] == '\0';
+}
 
 static uint8_t *shm_base = NULL;
 static size_t shm_bytes = 0;
@@ -131,6 +173,10 @@ void shmfb_init(void)
 
     if (path != NULL && *path != '\0') {
         shm_path = path;
+        shm_chip = getenv("VICE_SHM_CHIP");
+        if (shm_chip != NULL && *shm_chip == '\0') {
+            shm_chip = NULL;
+        }
         shm_trace = (getenv("VICE_SHM_TRACE") != NULL);
         if (shm_trace) {
             fprintf(stderr, "[shmfb] publishing to %s\n", shm_path);
@@ -264,11 +310,25 @@ void shmfb_refresh(struct video_canvas_s *canvas,
     if (!shmfb_enabled() || canvas == NULL || !canvas->created) {
         return;
     }
-    /* One publisher per mapping: the first canvas to get here owns it. */
+    /* One publisher per mapping. With VICE_SHM_CHIP set the owner is CHOSEN by
+       chip name; without it, the first canvas to get here owns it. */
     if (shm_owner == NULL) {
+        const char *chip = (canvas->videoconfig != NULL)
+                           ? canvas->videoconfig->chip_name : NULL;
+
+        if (shm_chip != NULL) {
+            if (chip == NULL || !shmfb_chip_matches(chip, shm_chip)) {
+                if (shm_trace) {
+                    fprintf(stderr, "[shmfb] canvas %p chip %s is not %s, skipping\n",
+                            (void *)canvas, chip != NULL ? chip : "(none)", shm_chip);
+                }
+                return;
+            }
+        }
         shm_owner = canvas;
         if (shm_trace) {
-            fprintf(stderr, "[shmfb] canvas %p owns the mapping\n", (void *)canvas);
+            fprintf(stderr, "[shmfb] canvas %p (chip %s) owns the mapping\n",
+                    (void *)canvas, chip != NULL ? chip : "(none)");
         }
     } else if (shm_owner != canvas) {
         return;
