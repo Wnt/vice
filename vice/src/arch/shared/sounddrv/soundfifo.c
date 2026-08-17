@@ -52,17 +52,40 @@
  *  It is registered as a RECORD device, again like `wav` and `fs`: that is
  *  what makes it selectable as -sounddev while writing to a file/pipe path
  *  given by -soundarg.
+ *
+ *  AND IT NEVER STALLS THE MACHINE.  `wav` and `fs` write through stdio, which
+ *  blocks, and a pipe nobody is draining fills after 64 KB -- a third of a
+ *  second of 48 kHz stereo.  The emulator then sits in write() servicing
+ *  NOTHING: not its control socket, not its monitor, not the checkpoint
+ *  restore its own launcher asked for.  Observed live on cbm2: the machine
+ *  never reached the `-initbreak ready` breakpoint, so the golden was never
+ *  restored, because no visitor was connected to read the audio.  This sink
+ *  opens the path O_NONBLOCK and DROPS what will not fit, which is the right
+ *  answer for a live exhibit: audio nobody is listening to is not worth a
+ *  stopped machine.  Framing survives a short write -- the next write is
+ *  padded back onto a 4-byte frame boundary, so a consumer clocked at
+ *  4 bytes per frame never inherits a half sample.
  */
 
 #include "vice.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
+#include <unistd.h>
 
+#include "log.h"
 #include "sound.h"
 #include "types.h"
 #include "archdep.h"
 
-static FILE *fifo_fd = NULL;
+static int fifo_fd = -1;
+
+/** \brief  Bytes of the current 4-byte frame already gone down the pipe. */
+static size_t fifo_misalign = 0;
+
+/** \brief  Bytes dropped because nobody was reading (logged at close). */
+static unsigned long fifo_dropped = 0;
 
 static int fifo_init(const char *param, int *speed, int *fragsize, int *fragnr,
                      int *channels)
@@ -74,10 +97,51 @@ static int fifo_init(const char *param, int *speed, int *fragsize, int *fragnr,
         *channels = 2;
     }
 
-    fifo_fd = fopen(param ? param : "vicesnd.pcm", MODE_WRITE);
+    /* O_NONBLOCK: see the comment at the top -- a full pipe must cost samples,
+       never the emulator's forward progress.  On a FIFO this also needs a
+       reader to already be there (ENXIO otherwise), which is exactly what the
+       station launcher's resident holder fd guarantees. */
+    fifo_fd = open(param ? param : "vicesnd.pcm",
+                   O_WRONLY | O_CREAT | O_TRUNC | O_NONBLOCK, 0644);
+    fifo_misalign = 0;
+    fifo_dropped = 0;
 
     /* No header.  That is the whole point of this file. */
-    return !fifo_fd;
+    return fifo_fd < 0;
+}
+
+/** \brief  Write what fits, drop the rest, and keep the frame boundary. */
+static void fifo_put(const uint8_t *buf, size_t len)
+{
+    ssize_t n;
+
+    if (fifo_misalign != 0) {
+        static const uint8_t pad[4] = { 0, 0, 0, 0 };
+        size_t want = 4 - fifo_misalign;
+
+        n = write(fifo_fd, pad, want);
+        if (n < 0) {
+            fifo_dropped += len;
+            return;                 /* still misaligned; try again next time */
+        }
+        fifo_misalign = (fifo_misalign + (size_t)n) & 3;
+        if (fifo_misalign != 0) {
+            fifo_dropped += len;
+            return;
+        }
+    }
+
+    n = write(fifo_fd, buf, len);
+    if (n < 0) {
+        /* EAGAIN: nobody is draining. EPIPE: the reader went away and the
+           holder fd will bring one back. Neither is worth stopping for. */
+        fifo_dropped += len;
+        return;
+    }
+    if ((size_t)n < len) {
+        fifo_dropped += len - (size_t)n;
+        fifo_misalign = (size_t)n & 3;
+    }
 }
 
 static int fifo_write(int16_t *pbuf, size_t nr)
@@ -92,14 +156,7 @@ static int fifo_write(int16_t *pbuf, size_t nr)
     }
 #endif
 
-    if (nr != fwrite(pbuf, sizeof(int16_t), nr, fifo_fd)) {
-#ifdef WORDS_BIGENDIAN
-        for (i = 0; i < nr; i++) {
-            pbuf[i] = (int16_t)((((uint16_t)pbuf[i] & 0xff) << 8) | ((uint16_t)pbuf[i] >> 8));
-        }
-#endif
-        return 1;
-    }
+    fifo_put((const uint8_t *)pbuf, nr * sizeof(int16_t));
 
 #ifdef WORDS_BIGENDIAN
     for (i = 0; i < nr; i++) {
@@ -114,8 +171,12 @@ static void fifo_close(void)
 {
     /* Nothing to patch up on close: there is no length field to fix, which is
        also why this sink survives being killed mid-stream. */
-    fclose(fifo_fd);
-    fifo_fd = NULL;
+    if (fifo_dropped != 0) {
+        log_message(LOG_DEFAULT, "Sound: fifo dropped %lu bytes with no reader",
+                    fifo_dropped);
+    }
+    close(fifo_fd);
+    fifo_fd = -1;
 }
 
 static const sound_device_t fifo_device =
