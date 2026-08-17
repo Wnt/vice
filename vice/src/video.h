@@ -279,6 +279,22 @@ void video_canvas_unmap(struct video_canvas_s *canvas);
 void video_canvas_resize(struct video_canvas_s *canvas, char resize_canvas);
 void video_canvas_render(struct video_canvas_s *canvas, uint8_t *trg, int width, int height, int xs, int ys, int xt, int yt, int pitcht);
 void video_canvas_refresh_all(struct video_canvas_s *canvas);
+
+/* WHICH REFRESHES ARE FINISHED FRAMES.
+   video_canvas_refresh() has two kinds of caller: the end-of-frame path, which
+   hands over a frame the emulator has just finished drawing, and refreshes
+   forced while the machine is STOPPED -- the monitor's refresh-on-break above
+   all -- which hand over whatever the stop caught.  A UI that publishes frames
+   to an external consumer has to be able to tell them apart; a UI that draws
+   into its own window does not care and never calls these.
+   video_canvas_repaint_forced() is the other half: raster_snapshot_read()
+   calls it, so it means "a snapshot just landed on a canvas" -- the one moment
+   everything the consumer can see is stale. */
+void video_canvas_repaint_forced(void);
+int video_canvas_repaint_pending(void);
+void video_canvas_frame_complete_begin(void);
+void video_canvas_frame_complete_end(void);
+int video_canvas_frame_is_complete(void);
 char video_canvas_can_resize(struct video_canvas_s *canvas);
 void video_viewport_get(struct video_canvas_s *canvas, struct viewport_s **viewport, struct geometry_s **geometry);
 void video_viewport_resize(struct video_canvas_s *canvas, char resize_canvas);

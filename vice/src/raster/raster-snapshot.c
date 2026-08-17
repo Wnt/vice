@@ -33,6 +33,7 @@
 #include "lib.h"
 #include "raster.h"
 #include "snapshot.h"
+#include "video.h"
 #include "videoarch.h"
 
 int raster_snapshot_write(snapshot_module_t *m, raster_t *raster)
@@ -123,6 +124,14 @@ int raster_snapshot_read(snapshot_module_t *m, raster_t *raster)
         /* Update the current draw buffer based on the interlace field */
         draw_buffer->draw_buffer = draw_buffer->draw_buffer_non_padded[raster->canvas->videoconfig->interlace_field & 1];
     }
+
+    /* A RASTER CANVAS WAS JUST RESTORED.  Every video chip's snapshot read
+       comes through here, and this is the only place that means "a snapshot
+       landed" and nothing else: raster_force_repaint() looks similar but also
+       fires on an ordinary mode or palette change during boot, which is not a
+       restore.  A UI that publishes frames to an external consumer uses this
+       to hold the reset moment together. */
+    video_canvas_repaint_forced();
 
     return 0;
 }

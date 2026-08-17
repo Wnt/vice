@@ -119,11 +119,15 @@ void raster_canvas_handle_end_of_frame(raster_t *raster)
         return;
     }
 
+    /* Bracketed so a UI can tell a FINISHED frame from a refresh forced while
+       the machine is stopped (the monitor's refresh-on-break). */
+    video_canvas_frame_complete_begin();
     if (raster->dont_cache) {
         video_canvas_refresh_all(raster->canvas);
     } else {
         refresh_canvas(raster);
     }
+    video_canvas_frame_complete_end();
 
     if (raster->canvas->videoconfig->interlaced) {
         /* swap the draw buffer pointers */

@@ -152,6 +152,42 @@ void video_canvas_refresh_all_tracked(void)
     }
 }
 
+/** \brief  Non-zero only inside the end-of-frame refresh (see video.h).
+ *
+ * Set by raster_canvas_handle_end_of_frame() around the refresh it issues, so
+ * an arch that publishes frames elsewhere can decline to publish a repaint of
+ * a stopped machine.
+ */
+static int frame_complete = 0;
+
+/** \brief  Set when a snapshot restore invalidated the canvas (see video.h). */
+static int repaint_pending = 0;
+
+void video_canvas_repaint_forced(void)
+{
+    repaint_pending = 1;
+}
+
+int video_canvas_repaint_pending(void)
+{
+    return repaint_pending;
+}
+
+void video_canvas_frame_complete_begin(void)
+{
+    frame_complete = 1;
+}
+
+void video_canvas_frame_complete_end(void)
+{
+    frame_complete = 0;
+}
+
+int video_canvas_frame_is_complete(void)
+{
+    return frame_complete;
+}
+
 void video_canvas_refresh_all(video_canvas_t *canvas)
 {
     viewport_t *viewport;

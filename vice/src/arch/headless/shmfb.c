@@ -57,6 +57,10 @@
  *                                insensitively: VICII, VDC, VIC, TED, CRTC.
  *                                Unset keeps the historical behaviour (the
  *                                first canvas to refresh claims the mapping).
+ *    VICE_SHM_HOLD_RESTORE (optional)  publish NOTHING until the machine has
+ *                                finished a frame after a snapshot restore.
+ *                                Set it when, and only when, the launcher is
+ *                                restoring a checkpoint at startup.
  *    VICE_SHM_TRACE  (optional)  log the mapping and a periodic publish count
  *
  *  WIRE FORMAT -- a 64-byte header followed by width*height 32bpp pixels:
@@ -130,6 +134,27 @@ static const char *shm_path = NULL;
 static const char *shm_chip = NULL;
 static int shm_trace = 0;
 
+/** \brief  Hold every frame until the restored scene is the frame we publish.
+ *
+ * A station that resets by RELAUNCHING and restoring a checkpoint boots the
+ * machine first: the ROM paints its power-on screen a character cell at a
+ * time, the monitor then reads the snapshot, and only after that is the
+ * exhibit's own scene on the canvas.  Published as it happens, that is a
+ * half-drawn line of text and a flash of the wrong screen -- the operator's
+ * "black dashes across one text row" -- on every single reset.
+ *
+ * With this set the mapping is left ALONE until the machine finishes a frame
+ * after a snapshot restore, so the consumer keeps showing the last frame of
+ * the previous session and then cuts, in one seqlock step, to the scene.
+ *
+ * The bound matters more than the feature: if the restore never happens (no
+ * golden, a golden the machine rejects), the hold expires and the exhibit
+ * shows the cold boot instead of nothing at all.
+ */
+#define SHM_HOLD_MAX_FRAMES 600     /* ~10 s at 60 Hz */
+static int shm_hold = 0;
+static uint64_t shm_held = 0;
+
 /** \brief  The canvas that claimed the mapping (see ONE PUBLISHER above). */
 static struct video_canvas_s *shm_owner = NULL;
 
@@ -177,6 +202,7 @@ void shmfb_init(void)
         if (shm_chip != NULL && *shm_chip == '\0') {
             shm_chip = NULL;
         }
+        shm_hold = (getenv("VICE_SHM_HOLD_RESTORE") != NULL);
         shm_trace = (getenv("VICE_SHM_TRACE") != NULL);
         if (shm_trace) {
             fprintf(stderr, "[shmfb] publishing to %s\n", shm_path);
@@ -309,6 +335,42 @@ void shmfb_refresh(struct video_canvas_s *canvas,
 
     if (!shmfb_enabled() || canvas == NULL || !canvas->created) {
         return;
+    }
+    /* ONLY FINISHED FRAMES LEAVE THIS PROCESS.  video_canvas_refresh() has two
+       kinds of caller: the end-of-frame path, which hands over a frame the
+       emulator has just drawn, and everything else -- the monitor's
+       refresh-on-break, a viewport resize -- which repaints the canvas while
+       the machine is STOPPED, i.e. hands over whatever state the stop caught.
+       That second kind is what a visitor sees as the restore's debris: the
+       monitor is open for the `undump`, so the frames it forces are the
+       cleared canvas at the geometry the restore is passing THROUGH, and on a
+       CRTC machine the mapping is resized to publish them. A consumer that
+       trusts our damage rect has no way to tell those apart, so they are not
+       published at all; the next end-of-frame is 20 ms away. */
+    if (!video_canvas_frame_is_complete()) {
+        if (shm_trace) {
+            fprintf(stderr, "[shmfb] not a finished frame, not published\n");
+        }
+        return;
+    }
+    /* HOLD ACROSS THE RESTORE (VICE_SHM_HOLD_RESTORE); see the comment on
+       shm_hold.  This is a finished frame, so the only question left is
+       whether it is a frame of the RESTORED machine. */
+    if (shm_hold) {
+        if (video_canvas_repaint_pending()) {
+            shm_hold = 0;
+            if (shm_trace) {
+                fprintf(stderr, "[shmfb] restore complete after %lu held frames,"
+                        " publishing again\n", (unsigned long)shm_held);
+            }
+        } else if (++shm_held >= SHM_HOLD_MAX_FRAMES) {
+            shm_hold = 0;
+            fprintf(stderr, "[shmfb] no snapshot restore after %lu frames -- "
+                    "publishing the machine as it is\n",
+                    (unsigned long)shm_held);
+        } else {
+            return;
+        }
     }
     /* One publisher per mapping. With VICE_SHM_CHIP set the owner is CHOSEN by
        chip name; without it, the first canvas to get here owns it. */
