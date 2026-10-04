@@ -121,6 +121,11 @@ void keyboard_key_pressed(signed long key, int mod);
 void keyboard_key_released(signed long key, int mod);
 void keyboard_key_clear(void);
 
+/* vicectl (kernel-hive): the keymap flags (enum shift_type) of the entry a
+   press of this host key with these host modifiers resolves to, or -1 when the
+   keymap does not map it. Read-only: the same lookup kbd_key_pressed() makes. */
+int keyboard_keysym_shift_flags(signed long key, int mod);
+
 /* shift/lock handling, the emulation may also call this */
 void keyboard_set_shiftlock(int state);
 int keyboard_get_shiftlock(void);

@@ -96,6 +96,23 @@
     So a modifier edge is a BARRIER IN BOTH DIRECTIONS, and key_drain() gets its
     ordering from three barriers rather than from the queue order. See there.
 
+    THE SHIFT LEVEL IS STAGED, NOT LATCHED WITH THE KEY (VICE_CTL_KEY_MOD_LEAD).
+    VICE applies every host key event at its own random point 1-2 frames later,
+    and a key whose keymap entry changes the emulated SHIFT (DESHIFT: `:` `*`
+    `+` `@` are Shift+key on a US keyboard but unshifted on a VIC-20; VIRTUAL
+    SHIFT: `'` `[` `]` the other way round) flips SHIFT and sets the key in ONE
+    atomic copy of the matrix. The KERNAL reads the matrix column by column
+    over ~1,000 cycles of its jiffy IRQ, so when that copy lands inside a scan
+    the guest reads SHIFT from before it and the key from after it: `:` became
+    `[` on the VIC-20 and C128 and `*` on the 8032, about once in 50. A real
+    typist cannot produce that, because their Shift goes down tens of ms
+    before the key. With a lead set, the module therefore keeps the host Shift
+    level it PRESENTS to VICE apart from the visitor's: before a key press it
+    presents the level that key needs (none for a deshift key, Shift for a
+    virtual-shift key, the visitor's own otherwise) and holds the press until
+    that level has been visible for the lead; after the keys are up it hands
+    the visitor's level back. See shift_need() and key_drain().
+
     Redundant edges COALESCE against the queued state, not the applied one:
     browser auto-repeat resends keydown with no keyup and the CBM KERNAL does
     its own repeat from the held matrix bit.
@@ -110,6 +127,10 @@
       VICE_CTL_KEY_HOLD   press->release dwell, ms                       [60]
       VICE_CTL_KEY_GAP    release->re-press dwell, ms                    [60]
       VICE_CTL_KEY_EXCL   1 => serialize non-modifier presses             [0]
+      VICE_CTL_KEY_MOD_LEAD  ms a key press waits after the shift level it
+                          needs (or any other modifier edge) reached the
+                          machine; enables shift staging. 0 = the pre-lead
+                          engine, byte for byte                          [0]
       VICE_CTL_TRACE      1 => one line per applied edge on stderr        [0]
 */
 
@@ -233,6 +254,11 @@ static int ctl_mod = 0;                 /* KBD_MOD_* accumulated host modifiers 
 static int ctl_excl_down = 0;           /* non-modifier keys currently down */
 static long ctl_excl_up_frame = -100000;
 static long ctl_hold_frames = 0, ctl_gap_frames = 0;
+static long ctl_lead_frames = 0;        /* VICE_CTL_KEY_MOD_LEAD; 0 = no staging */
+static int ctl_pres_shift = 0;          /* host Shift bits PRESENTED to VICE (staging) */
+static long ctl_mod_edge_frame = -100000;   /* last modifier level the machine was given */
+static long ctl_key_edge_frame = -100000;   /* last non-modifier edge applied */
+static unsigned long ctl_c_staged = 0;
 static int ctl_excl = 0;
 static int ctl_trace = 0;
 static unsigned long ctl_c_key = 0, ctl_c_coalesced = 0, ctl_c_err = 0;
@@ -413,6 +439,71 @@ static void track_host_mod(long sym, int pressed)
     }
 }
 
+/* --------------------------------------------------------- shift staging */
+
+#define CTL_SHIFT_BITS (KBD_MOD_LSHIFT | KBD_MOD_RSHIFT)
+
+static int sym_is_host_shift(long sym)
+{
+    return sym == XKS_SHIFT_L || sym == XKS_SHIFT_R;
+}
+
+/* Present `want` (KBD_MOD_LSHIFT/RSHIFT bits) as the host Shift state VICE
+   sees. Only ever called between key presses, never in the frame of one. */
+static void shift_present(int want, long why_sym)
+{
+    int diff = want ^ ctl_pres_shift;
+
+    if (diff & KBD_MOD_LSHIFT) {
+        if (want & KBD_MOD_LSHIFT) {
+            keyboard_key_pressed(XKS_SHIFT_L, ctl_mod);
+        } else {
+            keyboard_key_released(XKS_SHIFT_L, ctl_mod);
+        }
+    }
+    if (diff & KBD_MOD_RSHIFT) {
+        if (want & KBD_MOD_RSHIFT) {
+            keyboard_key_pressed(XKS_SHIFT_R, ctl_mod);
+        } else {
+            keyboard_key_released(XKS_SHIFT_R, ctl_mod);
+        }
+    }
+    if (ctl_trace) {
+        fprintf(stderr, "VICECTL frame=%ld stage shift 0x%x -> 0x%x for %ld\n",
+                ctl_frame, (unsigned)ctl_pres_shift, (unsigned)want, why_sym);
+    }
+    ctl_pres_shift = want;
+    ctl_mod_edge_frame = ctl_frame;
+    ctl_c_staged++;
+}
+
+/* The host Shift level the machine must see while this key is down: the
+   keymap entry VICE will pick (same lookup, same host modifiers) decides.
+   A DESHIFT key wants none, a VIRTUAL_SHIFT key wants one (the visitor's if
+   they hold one, Shift_L otherwise), anything else wants the visitor's own.
+   VICE then finds the level already in place when the key lands, so its own
+   virtual-shift/deshift logic changes nothing in the key's latch. */
+static int shift_need(const key_ent_t *e)
+{
+    int vis = ctl_mod & CTL_SHIFT_BITS;
+    int flags;
+
+    if (e->kind != KEY_KIND_SYM) {
+        return ctl_pres_shift;  /* MKEY names a matrix cell, not a level */
+    }
+    flags = keyboard_keysym_shift_flags(e->sym, ctl_mod);
+    if (flags < 0) {
+        return vis;
+    }
+    if (flags & DESHIFT_SHIFT) {
+        return 0;
+    }
+    if (flags & VIRTUAL_SHIFT) {
+        return vis ? vis : KBD_MOD_LSHIFT;
+    }
+    return vis;
+}
+
 /* ------------------------------------------------------------ key queue */
 
 static void key_enqueue(key_ent_t *e)
@@ -453,6 +544,16 @@ static void key_queue_flush(void)
 
 static void key_apply(key_ent_t *e)
 {
+    if (e->kind == KEY_KIND_SYM && ctl_lead_frames > 0 && sym_is_host_shift(e->sym)) {
+        /* staging: the visitor's Shift is a LEVEL the next press asks for
+           (shift_need), handed to VICE by shift_present(), never directly */
+        track_host_mod(e->sym, e->val);
+        if (ctl_trace) {
+            fprintf(stderr, "VICECTL frame=%ld visitor shift %ld val=%d mod=0x%x\n",
+                    ctl_frame, e->sym, e->val, (unsigned)ctl_mod);
+        }
+        return;
+    }
     if (e->kind == KEY_KIND_SYM) {
         track_host_mod(e->sym, e->val);
         if (e->val) {
@@ -491,11 +592,11 @@ static void key_apply(key_ent_t *e)
         press -- and it is safe, because a release carries no level and the key
         it ends is already down.
 
-   Barriers are raised ONLY by an edge held back by its own dwell gate or by the
-   EXCL gate, NEVER by an edge held back by a barrier. That is what makes the
-   relation acyclic: every barrier is cleared by the passage of time (a dwell
-   elapsing) or by a release that rule 3 always lets through, so no set of
-   barriers can wait on itself.
+   Barriers are raised ONLY by an edge held back by its own dwell gate, by the
+   modifier lead or by the EXCL gate, NEVER by an edge held back by a barrier.
+   That is what makes the relation acyclic: every barrier is cleared by the
+   passage of time (a dwell or the lead elapsing) or by a release that rule 3
+   always lets through, so no set of barriers can wait on itself.
 
    THE TWO DEFECTS THIS SHAPE EXISTS FOR, both found on the live vic20 station:
 
@@ -525,9 +626,10 @@ static void key_drain(void)
     key_ent_t *e, *prev = NULL, *next;
     int blocked[KEY_STATE_MAX];
     int n_blocked = 0, i, is_blocked;
-    /* BARRIERS. Set ONLY when an edge is held back by its own dwell gate or by
-       the EXCL gate -- never when it is held back by one of these barriers,
-       which is what keeps them acyclic and the drain deadlock-free. */
+    /* BARRIERS. Set ONLY when an edge is held back by its own dwell gate, the
+       modifier lead or the EXCL gate -- never when it is held back by one of
+       these barriers, which is what keeps them acyclic and the drain
+       deadlock-free. */
     int bar_press = 0;      /* a PRESS is waiting */
     int bar_mod = 0;        /* a MODIFIER edge is waiting */
     int bar_release = 0;    /* a NON-modifier RELEASE is waiting */
@@ -598,8 +700,41 @@ static void key_drain(void)
             continue;
         }
 
+        /* THE MODIFIER LEAD (VICE_CTL_KEY_MOD_LEAD; header: "THE SHIFT LEVEL
+           IS STAGED"). A press that is otherwise free to go first puts the
+           Shift level it needs in front of itself -- once the previous key's
+           edge has had a lead of its own, so a level never changes in the
+           latch of a key either -- and then waits until that level, or any
+           other modifier edge, has been visible for the lead. Both waits
+           clear by the passage of frames alone, so this is a dwell gate like
+           the per-key one above: it may raise a barrier without making the
+           relation cyclic. */
+        if (ctl_lead_frames > 0 && e->val == 1 && !mod_key) {
+            int need = shift_need(e);
+
+            if (need != ctl_pres_shift
+                && ctl_frame >= ctl_key_edge_frame + ctl_lead_frames) {
+                shift_present(need, e->sym);
+            }
+            if (need != ctl_pres_shift
+                || ctl_frame < ctl_mod_edge_frame + ctl_lead_frames) {
+                bar_press = 1;
+                if (n_blocked < KEY_STATE_MAX) {
+                    blocked[n_blocked++] = e->id;
+                }
+                prev = e;
+                continue;
+            }
+        }
+
         key_apply(e);
         ctl_c_key++;
+        if (!mod_key) {
+            ctl_key_edge_frame = ctl_frame;
+        } else if (!(ctl_lead_frames > 0 && e->kind == KEY_KIND_SYM
+                     && sym_is_host_shift(e->sym))) {
+            ctl_mod_edge_frame = ctl_frame;     /* a level the machine saw */
+        }
         if (e->val == 1) {
             st->down_frame = ctl_frame;
             st->down = 1;
@@ -627,6 +762,16 @@ drop:
         }
         lib_free(e->seq);
         lib_free(e);
+    }
+
+    /* Hand the visitor's own Shift level back once nothing is down, nothing is
+       queued and the last key edge has had its lead. Never while a press is
+       queued: that press stages the level it needs itself, and a flip here
+       first would only cost it a second lead. */
+    if (ctl_lead_frames > 0 && ctl_key_head == NULL && ctl_excl_down == 0
+        && ctl_pres_shift != (ctl_mod & CTL_SHIFT_BITS)
+        && ctl_frame >= ctl_key_edge_frame + ctl_lead_frames) {
+        shift_present(ctl_mod & CTL_SHIFT_BITS, 0);
     }
 }
 
@@ -829,6 +974,8 @@ static void dispatch(ctl_cmd_t *c)
         keyboard_key_clear();
         ctl_mod = 0;
         ctl_excl_down = 0;
+        ctl_pres_shift = 0;
+        ctl_mod_edge_frame = ctl_key_edge_frame = -100000;
         memset(ctl_key_state, 0, sizeof(ctl_key_state));
         reply_ok(c->conn, c->gen, c->seq, NULL);
     } else if (strcmp(verb, "KEYDUMP") == 0) {
@@ -858,10 +1005,11 @@ static void dispatch(ctl_cmd_t *c)
 
         snprintf(buf, sizeof(buf),
                  "frame=%ld keys=%lu coalesced=%lu err=%lu queued=%d mod=0x%x "
-                 "hold=%ld gap=%ld excl=%d clk=%lu",
+                 "hold=%ld gap=%ld excl=%d lead=%ld staged=%lu pres=0x%x clk=%lu",
                  ctl_frame, ctl_c_key, ctl_c_coalesced, ctl_c_err,
                  ctl_key_head != NULL, (unsigned)ctl_mod,
                  ctl_hold_frames, ctl_gap_frames, ctl_excl,
+                 ctl_lead_frames, ctl_c_staged, (unsigned)ctl_pres_shift,
                  (unsigned long)maincpu_clk);
         reply_ok(c->conn, c->gen, c->seq, buf);
     } else if (strcmp(verb, "EXIT") == 0) {
@@ -1103,7 +1251,7 @@ void vicectl_init(void)
 {
     struct sockaddr_un sa;
     long fps;
-    long hold_ms, gap_ms;
+    long hold_ms, gap_ms, lead_ms;
     int i;
 
     if (!vicectl_enabled()) {
@@ -1134,6 +1282,15 @@ void vicectl_init(void)
         ctl_gap_frames = 1;
     }
     ctl_excl = env_long("VICE_CTL_KEY_EXCL", 0) != 0;
+    /* the lead rounds UP like hold/gap, but 0 stays 0: off means off */
+    lead_ms = env_long("VICE_CTL_KEY_MOD_LEAD", 0);
+    if (lead_ms < 0) {
+        lead_ms = 0;
+    }
+    if (lead_ms > 1000) {
+        lead_ms = 1000;
+    }
+    ctl_lead_frames = (lead_ms * fps + 999) / 1000;
     ctl_trace = env_long("VICE_CTL_TRACE", 0) != 0;
 
     if (strlen(ctl_path) >= sizeof(sa.sun_path)) {
@@ -1167,8 +1324,8 @@ void vicectl_init(void)
     }
     ctl_thread_running = 1;
     log_message(ctl_log,
-                VICECTL_PROTO " listening on %s (hold=%ld gap=%ld frames, excl=%d, keys=%d)",
-                ctl_path, ctl_hold_frames, ctl_gap_frames, ctl_excl,
+                VICECTL_PROTO " listening on %s (hold=%ld gap=%ld lead=%ld frames, excl=%d, keys=%d)",
+                ctl_path, ctl_hold_frames, ctl_gap_frames, ctl_lead_frames, ctl_excl,
                 keyconvmap != NULL ? keyconvmap_num_keys : 0);
 }
 

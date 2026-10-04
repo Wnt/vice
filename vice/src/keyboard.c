@@ -655,6 +655,24 @@ static int keyb_find_in_keyconvtab(int sym, int mod)
     return found;
 }
 
+/* vicectl (kernel-hive): which keymap entry a press of `key` with host
+   modifiers `mod` would use, without pressing anything. The control module
+   needs it to put the emulated SHIFT level a key needs (virtual shift, deshift)
+   into the matrix BEFORE the key, instead of in the same latch as the key. */
+int keyboard_keysym_shift_flags(signed long key, int mod)
+{
+    int keynum;
+
+    if (keyconvmap == NULL) {
+        return -1;
+    }
+    keynum = keyb_find_in_keyconvtab((int)key, mod);
+    if (keynum < 0) {
+        return -1;
+    }
+    return (int)keyconvmap[keynum].shift;
+}
+
 /* press or release a key in the keyboard matrix
  * key: host key
  * mod: host key modifier
